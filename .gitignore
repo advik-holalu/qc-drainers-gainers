@@ -1,0 +1,24 @@
+# Environment variables - NEVER commit these
+.env
+*.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.claude/
+
+# OS
+.DS_Store
+
+# Streamlit secrets
+.streamlit/secrets.toml
+# Data files - don't commit large data exports
+*.csv
+*.xlsx
+*.xlsm
+*.xls
+*.xlsb
