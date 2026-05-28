@@ -210,6 +210,8 @@ def _top50_mask(magnitudes: pd.Series) -> list[bool]:
     """Return a positional boolean mask marking rows that cumulatively
     contribute to the first 50% of total `magnitudes` (sorted descending
     by caller). The row that crosses the 50% threshold is included.
+    Rows with zero or negative magnitude are never marked — they don't
+    contribute to growth/decline (callers clip them to 0 before passing).
     """
     if len(magnitudes) == 0:
         return []
@@ -218,22 +220,32 @@ def _top50_mask(magnitudes: pd.Series) -> list[bool]:
         return [False] * len(magnitudes)
     cum = magnitudes.cumsum()
     prior = cum - magnitudes
-    return (prior < 0.5 * total).tolist()
+    return ((magnitudes > 0) & (prior < 0.5 * total)).tolist()
 
 
-def _classify_issue(c_val, p_val) -> str:
-    """Label for the MZ expander. NaN takes priority over 0 in mixed cases
-    (e.g. NaN + 0 is reported as 'Missing in current'). Single-side zeros
-    are routed to the main tables upstream, so they don't reach here."""
-    c_miss = pd.isna(c_val)
-    p_miss = pd.isna(p_val)
-    if c_miss and p_miss:
-        return "Missing in both"
-    if c_miss:
-        return "Missing in current"
-    if p_miss:
-        return "Missing in previous"
-    return "Zero in both"
+def _classify_issue(ms_c, ms_p, oft_c, oft_p) -> str:
+    """Label for the MZ expander. Eligibility requires non-NULL MS and Offtake
+    on both sides; this classifier reports which side(s) are missing."""
+    parts: list[str] = []
+    ms_c_miss = pd.isna(ms_c)
+    ms_p_miss = pd.isna(ms_p)
+    if ms_c_miss and ms_p_miss:
+        parts.append("MS missing in both")
+    elif ms_c_miss:
+        parts.append("MS missing in current")
+    elif ms_p_miss:
+        parts.append("MS missing in previous")
+
+    oft_c_miss = pd.isna(oft_c)
+    oft_p_miss = pd.isna(oft_p)
+    if oft_c_miss and oft_p_miss:
+        parts.append("Offtake missing in both")
+    elif oft_c_miss:
+        parts.append("Offtake missing in current")
+    elif oft_p_miss:
+        parts.append("Offtake missing in previous")
+
+    return "; ".join(parts) if parts else ""
 
 
 def _flat_csv_columns(multi_cols) -> list[str]:
@@ -257,8 +269,13 @@ def _build_mz_view(missing_zero: pd.DataFrame) -> pd.DataFrame:
             ]
         )
     issues = [
-        _classify_issue(c, p)
-        for c, p in zip(missing_zero["Offtake_MRP_c"], missing_zero["Offtake_MRP_p"])
+        _classify_issue(msc, msp, oftc, oftp)
+        for msc, msp, oftc, oftp in zip(
+            missing_zero["MS_MRP_c"],
+            missing_zero["MS_MRP_p"],
+            missing_zero["Offtake_MRP_c"],
+            missing_zero["Offtake_MRP_p"],
+        )
     ]
     view = pd.DataFrame({
         "City": missing_zero["City"].values,
@@ -523,14 +540,16 @@ def render_dashboard() -> None:
     merged_all["OvSOV_d"] = _f("Overall_SOV_c") - _f("Overall_SOV_p")
     merged_all["ASP_d"] = _f("Selling_Price_c") - _f("Selling_Price_p")
 
-    # ── Split: clean (analysable movement) vs missing/zero ───────────────────
-    # MZ only when one side is NULL or both sides are zero. Single-side zeros
-    # stay in the main tables — they represent real starts/stops of sales:
-    #   p > 0, c = 0  → drainer (drop to zero)
-    #   p = 0, c > 0  → gainer (new SKU launch)
-    c = merged_all["Offtake_MRP_c"]
-    p = merged_all["Offtake_MRP_p"]
-    mz_mask = c.isna() | p.isna() | ((c == 0) & (p == 0))
+    # ── Split: eligible (non-NULL MS AND Offtake on both sides) vs MZ ────────
+    # Eligibility is purely about NULL: a value of 0 is valid (real zero) and
+    # stays in the main tables. The split into Drainers/Gainers below is by
+    # MS_pp sign, not Offtake — a row that lost MS while growing offtake is a
+    # Drainer (we lost share even while growing — the category outgrew us).
+    ms_c = merged_all["MS_MRP_c"]
+    ms_p = merged_all["MS_MRP_p"]
+    oft_c = merged_all["Offtake_MRP_c"]
+    oft_p = merged_all["Offtake_MRP_p"]
+    mz_mask = ms_c.isna() | ms_p.isna() | oft_c.isna() | oft_p.isna()
     clean = merged_all[~mz_mask].copy()
     missing_zero = merged_all[mz_mask].copy()
 
@@ -543,21 +562,25 @@ def render_dashboard() -> None:
     else:
         top80 = clean_sorted
 
-    # New sort: primary = Offtake Abs Δ; tiebreaker = SKU asc
+    # Split BY MS_pp sign; SORT BY Offtake abs Δ (these are intentionally
+    # independent — see comment above the eligibility check).
     drainers = (
-        top80[top80["Oft_abs"] < 0]
+        top80[top80["MS_pp"] < 0]
         .sort_values(["Oft_abs", "Product_Title"], ascending=[True, True])
         .reset_index(drop=True)
     )
     gainers = (
-        top80[top80["Oft_abs"] > 0]
+        top80[top80["MS_pp"] >= 0]
         .sort_values(["Oft_abs", "Product_Title"], ascending=[False, True])
         .reset_index(drop=True)
     )
 
-    # Top-50% cumulative offtake-contribution mask (per table)
-    drainer_mask = _top50_mask(drainers["Oft_abs"].abs())
-    gainer_mask = _top50_mask(gainers["Oft_abs"])
+    # Top-50% cumulative offtake-contribution mask (per table).
+    # Phase 8A split means each table can contain rows with the "wrong" Oft_abs
+    # sign (e.g. a MS-Gainer whose offtake actually declined). Clip those to 0
+    # so they don't poison the total and never get highlighted as contributors.
+    drainer_mask = _top50_mask((-drainers["Oft_abs"]).clip(lower=0))
+    gainer_mask = _top50_mask(gainers["Oft_abs"].clip(lower=0))
 
     # csv_suffix is computed once with the picker block, granularity-aware
 

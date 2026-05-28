@@ -325,7 +325,6 @@ def insert_data(
     Dashboard caches are cleared on success so the next dashboard view sees fresh data.
     """
     table = _table_for(granularity)
-    # TEMP DEBUG — remove after verifying granularity routing.
     mode = mode.lower()
     if mode not in ("append", "replace"):
         raise ValueError(f"mode must be 'append' or 'replace', got {mode!r}")
