@@ -501,3 +501,80 @@ def replace_sku_mapping(df: pd.DataFrame) -> dict:
         return {"success": True, "rows_inserted": rows_inserted}
     except Exception as exc:  # noqa: BLE001 — surface message to caller
         return {"success": False, "error": str(exc)}
+
+
+# ── Focus / New SKU lists (small, single-column TEXT-PK tables) ──────────────
+def _read_sku_list(table_name: str) -> list[str]:
+    """Read a single-column TEXT-PK table, return sorted erp_names. The
+    caching decorator is on the public wrappers (get_focus_skus / get_new_skus)
+    so a single helper here doesn't accidentally share cache keys across tables.
+    """
+    client = _get_client()
+    rows: list[dict] = []
+    start = 0
+    while True:
+        res = (
+            client
+            .table(table_name)
+            .select("erp_name")
+            .range(start, start + _PAGE_SIZE - 1)
+            .execute()
+        )
+        chunk = res.data or []
+        rows.extend(chunk)
+        if len(chunk) < _PAGE_SIZE:
+            break
+        start += _PAGE_SIZE
+    names = [
+        str(r["erp_name"]).strip()
+        for r in rows
+        if r.get("erp_name") and str(r["erp_name"]).strip()
+    ]
+    return sorted(set(names))
+
+
+def _replace_sku_list(table_name: str, erp_names: list[str]) -> dict:
+    """Truncate the given table then insert one row per non-empty erp_name.
+    Clears cache_data on success so downstream reads pick up the new state."""
+    try:
+        cleaned = sorted({
+            str(n).strip() for n in (erp_names or []) if n and str(n).strip()
+        })
+        client = _get_client()
+        # Sentinel filter that can't match any real row, since PostgREST delete
+        # requires a filter expression.
+        client.table(table_name).delete().neq(
+            "erp_name", "__never_match_sentinel__"
+        ).execute()
+        if cleaned:
+            client.table(table_name).insert(
+                [{"erp_name": n} for n in cleaned]
+            ).execute()
+        st.cache_data.clear()
+        return {"success": True, "count": len(cleaned)}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": str(exc)}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_focus_skus() -> list[str]:
+    """Sorted list of erp_names currently marked as Focus. Cached 1h; cleared on save."""
+    return _read_sku_list("focus_skus")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_new_skus() -> list[str]:
+    """Sorted list of erp_names currently marked as New. Cached 1h; cleared on save."""
+    return _read_sku_list("new_skus")
+
+
+def replace_focus_skus(erp_names: list[str]) -> dict:
+    """Replace focus_skus table contents. Returns {'success': bool, 'count': N}
+    on success or {'success': False, 'error': str} on failure."""
+    return _replace_sku_list("focus_skus", erp_names)
+
+
+def replace_new_skus(erp_names: list[str]) -> dict:
+    """Replace new_skus table contents. Returns {'success': bool, 'count': N}
+    on success or {'success': False, 'error': str} on failure."""
+    return _replace_sku_list("new_skus", erp_names)

@@ -328,6 +328,66 @@ def _format_month_label(d: date) -> str:
     return d.strftime("%B %Y")
 
 
+def _render_sku_list_section(
+    *,
+    label: str,
+    saved: list[str],
+    universe: list[str],
+    multiselect_key: str,
+    save_button_key: str,
+    save_fn,
+) -> None:
+    """Render a 'Focus SKUs' / 'New SKUs' sidebar section: header + multiselect
+    + dirty-aware Save button. `save_fn` is db.replace_focus_skus or
+    db.replace_new_skus. The multiselect's `default` only takes effect on first
+    render; after that, session_state[multiselect_key] drives the widget. Dirty
+    detection compares sorted lists so order doesn't matter.
+    """
+    st.sidebar.markdown(f"**{label}**")
+    if not universe and not saved:
+        st.sidebar.caption(
+            "No ERP names available — add SKU mappings via "
+            "Upload Data → Update SKU Mapping"
+        )
+        return
+
+    # Defensive: extend options so any saved or in-session selections that
+    # aren't currently in the universe (e.g. the mapping was edited later)
+    # still appear in the dropdown rather than crashing the widget.
+    existing = st.session_state.get(multiselect_key, saved)
+    options = sorted(set(universe) | set(saved) | set(existing))
+
+    current = st.sidebar.multiselect(
+        label,
+        options=options,
+        default=saved,
+        key=multiselect_key,
+        label_visibility="collapsed",
+    )
+    dirty = sorted(current) != sorted(saved)
+    if dirty:
+        if st.sidebar.button(
+            "● Save Changes",
+            type="primary",
+            key=save_button_key,
+            use_container_width=True,
+        ):
+            result = save_fn(current)
+            if result.get("success"):
+                st.toast(f"Saved {result.get('count', 0)} {label}", icon="✅")
+                st.rerun()
+            else:
+                st.sidebar.error(f"Save failed: {result.get('error', 'unknown')}")
+        st.sidebar.caption("Unsaved changes")
+    else:
+        st.sidebar.button(
+            "Saved ✓",
+            disabled=True,
+            key=save_button_key,
+            use_container_width=True,
+        )
+
+
 def _snap_to_available(picked, available: list[date]) -> date | None:
     """Return the available date closest to picked (None if list is empty)."""
     if not available:
@@ -561,11 +621,73 @@ def render_dashboard() -> None:
             st.session_state[f"flt_{_col}"] = []
         st.rerun()
 
+    # ── Focus / New SKU lists (sidebar) ──────────────────────────────────────
+    # Saved state — drives both the "Show only" filter and the dirty detection
+    # on the multiselects. We read these BEFORE rendering the multiselects so
+    # the filter uses what's saved in Supabase, not the unsaved pending state.
+    saved_focus = db.get_focus_skus()
+    saved_new = db.get_new_skus()
+
+    # Universe of valid ERP names from sku_mapping. Defensive: strip whitespace,
+    # drop NaN/empty, deduplicate, sort.
+    _mapping_df = db.get_sku_mapping_df()
+    if _mapping_df.empty or "erp_name" not in _mapping_df.columns:
+        erp_universe: list[str] = []
+    else:
+        erp_universe = sorted({
+            str(n).strip()
+            for n in _mapping_df["erp_name"].dropna()
+            if str(n).strip()
+        })
+
+    st.sidebar.divider()
+    st.sidebar.markdown("**Show only**")
+    st.sidebar.checkbox("Focus SKUs", key="show_only_focus_widget")
+    st.sidebar.checkbox("New SKUs", key="show_only_new_widget")
+
+    _render_sku_list_section(
+        label="Focus SKUs",
+        saved=saved_focus,
+        universe=erp_universe,
+        multiselect_key="focus_skus_multiselect",
+        save_button_key="focus_save_btn",
+        save_fn=db.replace_focus_skus,
+    )
+
+    st.sidebar.markdown("")  # visual breath between the two sections
+
+    _render_sku_list_section(
+        label="New SKUs",
+        saved=saved_new,
+        universe=erp_universe,
+        multiselect_key="new_skus_multiselect",
+        save_button_key="new_save_btn",
+        save_fn=db.replace_new_skus,
+    )
+
+    # ── Apply filters to the dataframe ───────────────────────────────────────
     filtered = period_df
     for _col in FILTER_COLS:
         sel = st.session_state.get(f"flt_{_col}", [])
         if sel:
             filtered = filtered[filtered[_col].astype(str).isin(sel)]
+
+    # Show-only filter: applied AFTER the regular filters and BEFORE the split
+    # so the top-80%/top-50% logic runs on the focus/new subset. Filter uses the
+    # SAVED list (not the pending multiselect state) — unsaved changes don't
+    # affect the visible tables until the user clicks Save.
+    show_focus = bool(st.session_state.get("show_only_focus_widget", False))
+    show_new = bool(st.session_state.get("show_only_new_widget", False))
+    if show_focus or show_new:
+        allowed: set[str] = set()
+        if show_focus:
+            allowed |= set(saved_focus)
+        if show_new:
+            allowed |= set(saved_new)
+        if "erp_name" in filtered.columns:
+            filtered = filtered[filtered["erp_name"].isin(allowed)]
+        else:
+            filtered = filtered.iloc[0:0]  # no erp_name → can't satisfy filter
 
     curr_all = filtered[filtered["Date"] == this_period_dt].copy()
     prev_all = filtered[filtered["Date"] == prev_period_dt].copy()
