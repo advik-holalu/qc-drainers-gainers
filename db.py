@@ -104,7 +104,7 @@ def _rename_and_clean(df: pd.DataFrame) -> pd.DataFrame:
     return df[ordered + extras]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_last_updated(granularity: str) -> Optional[datetime]:
     """Most recent uploaded_at timestamp for the granularity, or None if empty.
 
@@ -138,7 +138,7 @@ def get_row_count(granularity: str) -> int:
     return int(res.count or 0)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_available_dates(granularity: str) -> list[date]:
     """Sorted unique dates present in the table. Empty list if no rows."""
     table = _table_for(granularity)
@@ -163,9 +163,15 @@ def get_available_dates(granularity: str) -> list[date]:
     return sorted({d.date() for d in series.dropna()})
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_data_for_dates(granularity: str, dates: Sequence[date]) -> pd.DataFrame:
-    """Fetch all rows whose date is in the given list, returned with display column names."""
+    """Fetch all rows whose date is in the given list, returned with display column names.
+
+    Also left-joins the sku_mapping table on item_id so the returned frame has
+    an additional `erp_name` column (NULL for unmapped items). The join happens
+    in pandas — sku_mapping is small enough that this is simpler and faster
+    than a Postgres-side JOIN.
+    """
     table = _table_for(granularity)
     if not dates:
         return pd.DataFrame(columns=_DISPLAY_COLUMN_ORDER)
@@ -188,7 +194,24 @@ def get_data_for_dates(granularity: str, dates: Sequence[date]) -> pd.DataFrame:
         start += _PAGE_SIZE
     if not rows:
         return pd.DataFrame(columns=_DISPLAY_COLUMN_ORDER)
-    return _rename_and_clean(pd.DataFrame(rows)).reset_index(drop=True)
+    df = _rename_and_clean(pd.DataFrame(rows)).reset_index(drop=True)
+
+    # Left-join SKU mapping on item_id → expose erp_name. Display column name
+    # for item_id (after _rename_and_clean) is "Item ID"; align the mapping
+    # to that and stringify both sides so int/str mismatches don't lose rows.
+    mapping = get_sku_mapping_df()
+    if not mapping.empty and "item_id" in mapping.columns and "Item ID" in df.columns:
+        mapping_slim = (
+            mapping[["item_id", "erp_name"]]
+            .rename(columns={"item_id": "Item ID"})
+            .dropna(subset=["Item ID"])
+        )
+        mapping_slim["Item ID"] = mapping_slim["Item ID"].astype(str).str.strip()
+        df["Item ID"] = df["Item ID"].astype(str).str.strip()
+        df = df.merge(mapping_slim, on="Item ID", how="left")
+    else:
+        df["erp_name"] = pd.NA
+    return df
 
 
 def _clean_nans(records: list[dict]) -> list[dict]:
@@ -383,3 +406,98 @@ def insert_data(
         "batches_failed": batches_failed,
         "errors": errors,
     }
+
+
+# ── SKU mapping table ────────────────────────────────────────────────────────
+_SKU_MAPPING_TABLE = "sku_mapping"
+_SKU_MAPPING_COLS = ("item_id", "platform_item_name", "erp_name", "platform")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sku_mapping_count() -> int:
+    """Row count of sku_mapping. Cached for 1h; cache is cleared on replace."""
+    res = (
+        _get_client()
+        .table(_SKU_MAPPING_TABLE)
+        .select("item_id", count="exact", head=True)
+        .execute()
+    )
+    return int(res.count or 0)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sku_mapping_df() -> pd.DataFrame:
+    """Full sku_mapping table as a DataFrame. Cached for 1h; cleared on replace."""
+    client = _get_client()
+    rows: list[dict] = []
+    start = 0
+    while True:
+        res = (
+            client
+            .table(_SKU_MAPPING_TABLE)
+            .select("*")
+            .range(start, start + _PAGE_SIZE - 1)
+            .execute()
+        )
+        chunk = res.data or []
+        rows.extend(chunk)
+        if len(chunk) < _PAGE_SIZE:
+            break
+        start += _PAGE_SIZE
+    if not rows:
+        return pd.DataFrame(columns=list(_SKU_MAPPING_COLS) + ["updated_at"])
+    return pd.DataFrame(rows)
+
+
+def replace_sku_mapping(df: pd.DataFrame) -> dict:
+    """Truncate sku_mapping and insert the given rows via the async parallel
+    batch path. df must have columns (item_id, platform_item_name, erp_name,
+    platform) — extras ignored, missing columns raise.
+
+    Returns {"success": bool, "rows_inserted": int} on success or
+    {"success": False, "error": "..."} on failure.
+    """
+    missing = [c for c in _SKU_MAPPING_COLS if c not in df.columns]
+    if missing:
+        return {"success": False, "error": f"Missing columns: {missing}"}
+
+    try:
+        df = df[list(_SKU_MAPPING_COLS)].copy()
+        records = _clean_nans(df.to_dict(orient="records"))
+
+        client = _get_client()
+        # Truncate. Sentinel filter that can't match any real item_id, since
+        # PostgREST delete requires a filter expression.
+        client.table(_SKU_MAPPING_TABLE).delete().neq(
+            "item_id", "__never_match_sentinel__"
+        ).execute()
+
+        if not records:
+            st.cache_data.clear()
+            return {"success": True, "rows_inserted": 0}
+
+        batches = [
+            records[i : i + INSERT_BATCH_SIZE]
+            for i in range(0, len(records), INSERT_BATCH_SIZE)
+        ]
+        url, api_key = _read_credentials()
+        results = asyncio.run(
+            _upload_batches_parallel(
+                url, _SKU_MAPPING_TABLE, api_key, batches,
+                on_conflict=None, on_progress=None,
+            )
+        )
+
+        rows_inserted = sum(r for r in results if isinstance(r, int))
+        errors = [str(r) for r in results if isinstance(r, Exception)]
+        if errors:
+            return {
+                "success": False,
+                "error": f"{len(errors)} batch(es) failed: " + "; ".join(errors[:3]),
+                "rows_inserted": rows_inserted,
+            }
+
+        st.cache_data.clear()
+        return {"success": True, "rows_inserted": rows_inserted}
+    except Exception as exc:  # noqa: BLE001 — surface message to caller
+        return {"success": False, "error": str(exc)}

@@ -52,8 +52,12 @@ def _build_column_rename_map(
 
 
 # ── state helpers ────────────────────────────────────────────────────────────
+MAPPING_EXPECTED_COLUMNS = ["item_id", "Platform Item Name", "ERP Name", "Platform"]
+
+
 def _init_state() -> None:
     defaults = {
+        # Data upload flow (Tab 1)
         "upload_authed": False,
         "upload_step": "config",
         "upload_file_df": None,
@@ -62,6 +66,11 @@ def _init_state() -> None:
         "upload_granularity": "Weekly",
         "upload_mode": "Append",
         "upload_file_widget_counter": 0,
+        # SKU mapping flow (Tab 2)
+        "mapping_step": "config",
+        "mapping_file_df": None,
+        "mapping_result": None,
+        "mapping_file_widget_counter": 0,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -74,6 +83,246 @@ def _reset_upload_state() -> None:
     st.session_state.upload_result = None
     # Bump the counter so the file_uploader widget gets a fresh key and clears.
     st.session_state.upload_file_widget_counter += 1
+
+
+def _reset_mapping_state() -> None:
+    st.session_state.mapping_step = "config"
+    st.session_state.mapping_file_df = None
+    st.session_state.mapping_result = None
+    st.session_state.mapping_file_widget_counter += 1
+
+
+def _validate_mapping_file(uploaded_file):
+    """Returns (df_or_None, errors, warnings). df returned only if no errors."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    name = (uploaded_file.name or "").lower()
+    try:
+        uploaded_file.seek(0)
+        if name.endswith(".xlsx"):
+            df = pd.read_excel(uploaded_file)
+        elif name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            errors.append("File must be .csv or .xlsx.")
+            return None, errors, warnings
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Could not parse file: {exc}")
+        return None, errors, warnings
+
+    # Column count + exact-match (case-sensitive) header check
+    if len(df.columns) != 4:
+        errors.append(
+            f"File must have exactly 4 columns; got {len(df.columns)}: {df.columns.tolist()}"
+        )
+        return None, errors, warnings
+    actual = df.columns.tolist()
+    if actual != MAPPING_EXPECTED_COLUMNS:
+        errors.append(
+            f"Column headers must be exactly {MAPPING_EXPECTED_COLUMNS} (case-sensitive); "
+            f"got {actual}"
+        )
+        return None, errors, warnings
+
+    # Normalize values
+    df["item_id"] = df["item_id"].astype(str).str.strip()
+    for col in ("Platform Item Name", "ERP Name", "Platform"):
+        df[col] = df[col].astype(str).str.strip()
+    # After astype(str) NaN becomes the literal "nan" — collapse both that and
+    # the empty string to None for nullable columns so they store as SQL NULL.
+    for col in ("Platform Item Name", "Platform"):
+        df[col] = df[col].where(~df[col].isin(("", "nan", "NaN", "None")), None)
+
+    # Identify bad rows. Show row numbers as 1-indexed including header (so row 2
+    # = first data row, matching what Excel/spreadsheet users expect).
+    empty_id = df["item_id"].isin(("", "nan", "NaN", "None")) | df["item_id"].isna()
+    if empty_id.any():
+        rows = [int(i) + 2 for i in df.index[empty_id].tolist()][:15]
+        errors.append(f"Empty item_id at row(s): {rows}")
+
+    empty_erp = df["ERP Name"].isin(("", "nan", "NaN", "None")) | df["ERP Name"].isna()
+    if empty_erp.any():
+        rows = [int(i) + 2 for i in df.index[empty_erp].tolist()][:15]
+        errors.append(f"Empty ERP Name at row(s): {rows}")
+
+    dup_mask = df.duplicated(subset=["item_id"], keep=False) & ~empty_id
+    if dup_mask.any():
+        dup_ids = df.loc[dup_mask, "item_id"].unique().tolist()[:10]
+        errors.append(f"Duplicate item_id(s): {dup_ids}")
+
+    if errors:
+        return None, errors, warnings
+
+    # Warnings (non-blocking)
+    blank_platform = int(df["Platform"].isna().sum())
+    if blank_platform > 0:
+        warnings.append(f"{blank_platform} row(s) have empty Platform")
+    blank_pname = int(df["Platform Item Name"].isna().sum())
+    if blank_pname > 0:
+        warnings.append(f"{blank_pname} row(s) have empty Platform Item Name")
+
+    # Rename to DB column names for downstream insert
+    db_df = df.rename(
+        columns={
+            "Platform Item Name": "platform_item_name",
+            "ERP Name": "erp_name",
+            "Platform": "platform",
+        }
+    )
+    return db_df, errors, warnings
+
+
+# ── SKU mapping flow (Tab 2) ─────────────────────────────────────────────────
+def _render_mapping_config_step() -> None:
+    st.subheader("🏷️ Update SKU Mapping")
+
+    count = db.get_sku_mapping_count()
+    if count > 0:
+        df = db.get_sku_mapping_df()
+        if "updated_at" in df.columns and not df.empty:
+            try:
+                latest = pd.to_datetime(df["updated_at"]).max()
+                st.caption(
+                    f"Currently mapped: **{count:,} SKUs** · "
+                    f"Last updated: {latest.strftime('%d %b %Y, %H:%M')} UTC"
+                )
+            except Exception:  # noqa: BLE001
+                st.caption(f"Currently mapped: **{count:,} SKUs**")
+        else:
+            st.caption(f"Currently mapped: **{count:,} SKUs**")
+    else:
+        st.caption("Currently mapped: **0 SKUs** (no mapping uploaded yet)")
+
+    st.info(
+        "Uploading a new file will **REPLACE** the entire mapping. The dashboard "
+        "will immediately use the new ERP names for matching `item_id`s."
+    )
+
+    with st.expander("💡 Expected format"):
+        st.markdown(
+            """
+            The file must have **exactly 4 columns** with these case-sensitive
+            headers (any order in the file, but the headers must match exactly):
+
+            | Column | Header | Notes |
+            |---|---|---|
+            | A | `item_id` | Primary key, required, no duplicates |
+            | B | `Platform Item Name` | Optional |
+            | C | `ERP Name` | Required |
+            | D | `Platform` | Optional |
+
+            Accepted file types: `.csv` or `.xlsx`.
+            """
+        )
+
+    uploaded = st.file_uploader(
+        "Upload SKU mapping file (.csv or .xlsx)",
+        type=["csv", "xlsx"],
+        accept_multiple_files=False,
+        key=f"mapping_file_widget_{st.session_state.mapping_file_widget_counter}",
+    )
+    if uploaded is None:
+        return
+
+    with st.spinner("Validating file…"):
+        df, errors, warnings = _validate_mapping_file(uploaded)
+
+    if errors:
+        for err in errors:
+            st.error(err)
+        return
+
+    # Stash warnings on the df so the preview step can show them too
+    st.session_state.mapping_file_df = df
+    st.session_state.mapping_warnings = warnings
+    st.session_state.mapping_step = "preview"
+    st.rerun()
+
+
+def _render_mapping_preview_step() -> None:
+    st.subheader("📋 Review SKU Mapping")
+    df = st.session_state.mapping_file_df
+    existing = db.get_sku_mapping_count()
+    st.markdown(
+        f"**{len(df):,} new mappings** will replace **{existing:,} existing mappings**"
+    )
+
+    for w in st.session_state.get("mapping_warnings", []) or []:
+        st.warning(f"⚠️ {w}")
+
+    st.dataframe(df.head(10), width="stretch", hide_index=True)
+
+    st.error(
+        "⚠️ This will **DELETE** the current mapping and replace it with the "
+        "uploaded file. **This cannot be undone.**"
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Cancel", key="mapping_cancel_btn", use_container_width=True):
+            _reset_mapping_state()
+            st.rerun()
+    with c2:
+        if st.button(
+            "Confirm and Replace",
+            key="mapping_confirm_btn",
+            use_container_width=True,
+            type="primary",
+        ):
+            st.session_state.mapping_step = "uploading"
+            st.rerun()
+
+
+def _render_mapping_uploading_step() -> None:
+    st.subheader("Replacing SKU mapping…")
+    df = st.session_state.mapping_file_df
+    with st.spinner("Writing to database…"):
+        try:
+            result = db.replace_sku_mapping(df)
+        except Exception as exc:  # noqa: BLE001
+            result = {"success": False, "error": f"Upload failed: {exc}"}
+    st.session_state.mapping_result = result
+    st.session_state.mapping_step = "success"
+    st.rerun()
+
+
+def _render_mapping_success_step() -> None:
+    result = st.session_state.mapping_result or {}
+    if result.get("success"):
+        n = int(result.get("rows_inserted", 0))
+        st.success(f"✅ SKU mapping updated")
+        st.markdown(
+            f"""
+            - **Mappings inserted:** {n:,}
+            - **Table:** `sku_mapping`
+            - **Mode:** Replace (truncate + insert)
+            """
+        )
+    else:
+        st.error(f"Upload failed: {result.get('error', 'Unknown error')}")
+        if "rows_inserted" in result:
+            st.caption(f"{result['rows_inserted']:,} rows were inserted before failure.")
+
+    if st.button("Upload another mapping", key="mapping_another_btn", use_container_width=True):
+        _reset_mapping_state()
+        st.rerun()
+
+
+def _render_mapping_flow() -> None:
+    step = st.session_state.mapping_step
+    if step == "config":
+        _render_mapping_config_step()
+    elif step == "preview":
+        _render_mapping_preview_step()
+    elif step == "uploading":
+        _render_mapping_uploading_step()
+    elif step == "success":
+        _render_mapping_success_step()
+    else:
+        st.warning(f"Unknown mapping step: {step}. Resetting.")
+        _reset_mapping_state()
+        st.rerun()
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -460,16 +709,8 @@ def _render_success_step() -> None:
             st.rerun()
 
 
-# ── public entrypoint ────────────────────────────────────────────────────────
-def render_upload() -> None:
-    _init_state()
-
-    if not st.session_state.upload_authed:
-        _render_password_gate()
-        return
-
-    _render_authed_header()
-
+def _render_data_flow() -> None:
+    """Tab 1 — existing GobbleCube data upload flow, untouched."""
     step = st.session_state.upload_step
     if step == "config":
         _render_config_step()
@@ -485,3 +726,20 @@ def render_upload() -> None:
         st.warning(f"Unknown upload step: {step}. Resetting.")
         _reset_upload_state()
         st.rerun()
+
+
+# ── public entrypoint ────────────────────────────────────────────────────────
+def render_upload() -> None:
+    _init_state()
+
+    if not st.session_state.upload_authed:
+        _render_password_gate()
+        return
+
+    _render_authed_header()
+
+    tab_data, tab_mapping = st.tabs(["📤 Upload Data", "🏷️ Update SKU Mapping"])
+    with tab_data:
+        _render_data_flow()
+    with tab_mapping:
+        _render_mapping_flow()

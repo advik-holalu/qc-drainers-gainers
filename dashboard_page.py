@@ -36,7 +36,7 @@ _DISPLAY_TO_INTERNAL = {
 
 KEY_COLS = ["City", "Ptype", "Variant", "Product_Title", "Platform", "Category"]
 METRIC_COLS = ["Offtake_MRP", "MS_MRP", "Wt_OSA", "Ad_SOV", "Overall_SOV", "Selling_Price"]
-FILTER_COLS = ["Platform", "Category", "Ptype", "Variant"]
+FILTER_COLS = ["Platform", "City", "Category", "Ptype", "Variant"]
 
 # Subtle row backgrounds for the top-50% offtake contributors. Slightly lifted
 # tones that read across both light and dark modes.
@@ -118,58 +118,74 @@ def frad(v):
 # columns Streamlit flattens the lookup to the leaf in column_config.
 
 _FMT = {
-    ("MS", "Prev"): fp,          ("MS", "Current"): fp,
-    ("MS", "PP Δ"): fpd,         ("MS", "% Δ"): fpd,
-    ("Offtake (MRP)", "Current"): fr, ("Offtake (MRP)", "Prev"): fr,
-    ("Offtake (MRP)", "Abs Δ"): frd, ("Offtake (MRP)", "% Δ"): fpd,
-    ("OSA", "Prev"): fp,         ("OSA", "Current"): fp,   ("OSA", "Δ pp"): fpd,
-    ("Ad SOV", "Prev"): fp,      ("Ad SOV", "Current"): fp, ("Ad SOV", "Δ pp"): fpd,
-    ("Overall SOV", "Prev"): fp, ("Overall SOV", "Current"): fp, ("Overall SOV", "Δ pp"): fpd,
-    ("ASP", "Prev"): fra,        ("ASP", "Current"): fra,  ("ASP", "Δ abs"): frad,
+    "MS Prev": fp,             "MS Current": fp,
+    "MS PP Δ": fpd,            "MS % Δ": fpd,
+    "Offtake Current": fr,     "Offtake Prev": fr,
+    "Offtake Abs Δ": frd,      "Offtake % Δ": fpd,
+    "OSA Prev": fp,            "OSA Current": fp,        "OSA PP Δ": fpd,
+    "Ad SOV Prev": fp,         "Ad SOV Current": fp,     "Ad SOV PP Δ": fpd,
+    "Overall SOV Prev": fp,    "Overall SOV Current": fp, "Overall SOV PP Δ": fpd,
+    "ASP Prev": fra,           "ASP Current": fra,       "ASP Abs Δ": frad,
 }
 
 _DELTA_COLS = [
-    ("MS", "PP Δ"), ("MS", "% Δ"),
-    ("Offtake (MRP)", "Abs Δ"), ("Offtake (MRP)", "% Δ"),
-    ("OSA", "Δ pp"),
-    ("Ad SOV", "Δ pp"),
-    ("Overall SOV", "Δ pp"),
-    ("ASP", "Δ abs"),
+    "MS PP Δ", "MS % Δ",
+    "Offtake Abs Δ", "Offtake % Δ",
+    "OSA PP Δ",
+    "Ad SOV PP Δ",
+    "Overall SOV PP Δ",
+    "ASP Abs Δ",
 ]
 
 
+def _resolve_sku_column(data: pd.DataFrame) -> pd.Series:
+    """Return the Series of strings to display in the SKU column.
+
+    Honours the sidebar toggle:
+      • ERP Name      → erp_name, with Product_Title as fallback for NULLs.
+      • Platform Name → Product_Title (the GobbleCube name).
+    """
+    mode = st.session_state.get("sku_display_mode", "ERP Name")
+    title = data["Product_Title"]
+    if mode == "ERP Name" and "erp_name" in data.columns:
+        erp = data["erp_name"]
+        return erp.where(erp.notna(), title)
+    return title
+
+
 def _make_display(data: pd.DataFrame) -> pd.DataFrame:
+    # Flat single-row headers (no MultiIndex). Identifier order: SKU, City,
+    # Platform first (these are pinned-left at render time via column_config
+    # to stay frozen while the user scrolls the metric columns horizontally).
     cols = {
-        ("", "City"): data["City"].values,
-        ("", "Ptype"): data["Ptype"].values,
-        ("", "Variant"): data["Variant"].values,
-        ("", "SKU"): data["Product_Title"].values,
-        ("", "Platform"): data["Platform"].values,
-        ("", "Category"): data["Category"].values,
-        ("MS", "Prev"): data["MS_MRP_p"].values,
-        ("MS", "Current"): data["MS_MRP_c"].values,
-        ("MS", "PP Δ"): data["MS_pp"].values,
-        ("MS", "% Δ"): data["MS_pct"].values,
-        ("Offtake (MRP)", "Current"): data["Offtake_MRP_c"].values,
-        ("Offtake (MRP)", "Prev"): data["Offtake_MRP_p"].values,
-        ("Offtake (MRP)", "Abs Δ"): data["Oft_abs"].values,
-        ("Offtake (MRP)", "% Δ"): data["Oft_pct"].values,
-        ("OSA", "Prev"): data["Wt_OSA_p"].values,
-        ("OSA", "Current"): data["Wt_OSA_c"].values,
-        ("OSA", "Δ pp"): data["OSA_d"].values,
-        ("Ad SOV", "Prev"): data["Ad_SOV_p"].values,
-        ("Ad SOV", "Current"): data["Ad_SOV_c"].values,
-        ("Ad SOV", "Δ pp"): data["AdSOV_d"].values,
-        ("Overall SOV", "Prev"): data["Overall_SOV_p"].values,
-        ("Overall SOV", "Current"): data["Overall_SOV_c"].values,
-        ("Overall SOV", "Δ pp"): data["OvSOV_d"].values,
-        ("ASP", "Prev"): data["Selling_Price_p"].values,
-        ("ASP", "Current"): data["Selling_Price_c"].values,
-        ("ASP", "Δ abs"): data["ASP_d"].values,
+        "SKU": _resolve_sku_column(data).values,
+        "City": data["City"].values,
+        "Platform": data["Platform"].values,
+        "Ptype": data["Ptype"].values,
+        "Variant": data["Variant"].values,
+        "Category": data["Category"].values,
+        "MS Prev": data["MS_MRP_p"].values,
+        "MS Current": data["MS_MRP_c"].values,
+        "MS PP Δ": data["MS_pp"].values,
+        "MS % Δ": data["MS_pct"].values,
+        "Offtake Current": data["Offtake_MRP_c"].values,
+        "Offtake Prev": data["Offtake_MRP_p"].values,
+        "Offtake Abs Δ": data["Oft_abs"].values,
+        "Offtake % Δ": data["Oft_pct"].values,
+        "OSA Prev": data["Wt_OSA_p"].values,
+        "OSA Current": data["Wt_OSA_c"].values,
+        "OSA PP Δ": data["OSA_d"].values,
+        "Ad SOV Prev": data["Ad_SOV_p"].values,
+        "Ad SOV Current": data["Ad_SOV_c"].values,
+        "Ad SOV PP Δ": data["AdSOV_d"].values,
+        "Overall SOV Prev": data["Overall_SOV_p"].values,
+        "Overall SOV Current": data["Overall_SOV_c"].values,
+        "Overall SOV PP Δ": data["OvSOV_d"].values,
+        "ASP Prev": data["Selling_Price_p"].values,
+        "ASP Current": data["Selling_Price_c"].values,
+        "ASP Abs Δ": data["ASP_d"].values,
     }
-    out = pd.DataFrame(cols)
-    out.columns = pd.MultiIndex.from_tuples(out.columns)
-    return out
+    return pd.DataFrame(cols)
 
 
 def _color_deltas(data: pd.DataFrame) -> pd.DataFrame:
@@ -248,23 +264,28 @@ def _classify_issue(ms_c, ms_p, oft_c, oft_p) -> str:
     return "; ".join(parts) if parts else ""
 
 
-def _flat_csv_columns(multi_cols) -> list[str]:
-    return [f"{grp} {sub}".strip() if grp else sub for grp, sub in multi_cols]
-
-
 def _drainers_gainers_csv_bytes(data: pd.DataFrame) -> bytes:
-    """CSV with raw, unformatted values matching the user's filtered+sorted view."""
-    display = _make_display(data)
-    flat = display.copy()
-    flat.columns = _flat_csv_columns(flat.columns)
-    return flat.to_csv(index=False).encode("utf-8")
+    """CSV with raw, unformatted values matching the user's filtered+sorted view.
+    Always exports BOTH Product (ERP) and Product (Platform) at the front,
+    regardless of the on-screen toggle, so analysts have full info offline."""
+    platform_series = data["Product_Title"]
+    if "erp_name" in data.columns:
+        erp_series = data["erp_name"].where(data["erp_name"].notna(), platform_series)
+    else:
+        erp_series = platform_series
+    display = _make_display(data).copy()
+    if "SKU" in display.columns:
+        display = display.drop(columns=["SKU"])
+    display.insert(0, "Product (Platform)", platform_series.values)
+    display.insert(0, "Product (ERP)", erp_series.values)
+    return display.to_csv(index=False).encode("utf-8")
 
 
 def _build_mz_view(missing_zero: pd.DataFrame) -> pd.DataFrame:
     if missing_zero.empty:
         return pd.DataFrame(
             columns=[
-                "City", "Ptype", "Variant", "SKU", "Platform", "Category",
+                "SKU", "City", "Platform", "Ptype", "Variant", "Category",
                 "Offtake (MRP) This Week", "Offtake (MRP) Previous Week", "Issue",
             ]
         )
@@ -278,11 +299,11 @@ def _build_mz_view(missing_zero: pd.DataFrame) -> pd.DataFrame:
         )
     ]
     view = pd.DataFrame({
+        "SKU": missing_zero["Product_Title"].values,
         "City": missing_zero["City"].values,
+        "Platform": missing_zero["Platform"].values,
         "Ptype": missing_zero["Ptype"].values,
         "Variant": missing_zero["Variant"].values,
-        "SKU": missing_zero["Product_Title"].values,
-        "Platform": missing_zero["Platform"].values,
         "Category": missing_zero["Category"].values,
         "Offtake (MRP) This Week": missing_zero["Offtake_MRP_c"].values,
         "Offtake (MRP) Previous Week": missing_zero["Offtake_MRP_p"].values,
@@ -298,8 +319,8 @@ def _format_last_updated(dt) -> str:
 
 
 def _format_week_label(d: date) -> str:
-    """Format a weekly snapshot date as DD/MM/YYYY with leading zeros."""
-    return d.strftime("%d/%m/%Y")
+    """Format a weekly snapshot date as 'Mon DD, YYYY' (e.g. 'Apr 27, 2026')."""
+    return d.strftime("%b %d, %Y")
 
 
 def _format_month_label(d: date) -> str:
@@ -318,7 +339,7 @@ def _snap_to_available(picked, available: list[date]) -> date | None:
 
 # ── Main render ──────────────────────────────────────────────────────────────
 def render_dashboard() -> None:
-    # ── Page header ──────────────────────────────────────────────────────────
+    # ── Page header (main body) ──────────────────────────────────────────────
     title_col, refresh_col = st.columns([6, 1])
     with title_col:
         st.title("QC Drainers/Gainers Dashboard")
@@ -328,8 +349,31 @@ def render_dashboard() -> None:
             st.cache_data.clear()
             st.rerun()
 
-    # ── Granularity toggle ───────────────────────────────────────────────────
-    granularity = st.radio(
+    # The "Comparing X vs Y" panel is pinned at the very top of the sidebar so
+    # it's always visible, but its values depend on the date pickers below.
+    # We render a placeholder first, then write into it after the pickers
+    # resolve their selected periods.
+    comparing_slot = st.sidebar.empty()
+
+    # ── SKU display toggle ──────────────────────────────────────────────────
+    # Decoupled widget key: persistent `sku_display_mode` survives unmounting
+    # when the user navigates away from the dashboard (Phase 7 pattern).
+    _sku_opts = ["ERP Name", "Platform Name"]
+    st.session_state.setdefault("sku_display_mode", _sku_opts[0])
+    _current_mode = st.session_state.sku_display_mode
+    _mode_idx = _sku_opts.index(_current_mode) if _current_mode in _sku_opts else 0
+    st.session_state.sku_display_mode = st.sidebar.radio(
+        "Display SKU as",
+        options=_sku_opts,
+        index=_mode_idx,
+        horizontal=True,
+        key="sku_display_mode_widget",
+    )
+
+    st.sidebar.markdown("---")
+
+    # ── Granularity toggle (sidebar) ─────────────────────────────────────────
+    granularity = st.sidebar.radio(
         "Data granularity",
         options=["Daily", "Weekly", "Monthly"],
         index=1,
@@ -344,12 +388,12 @@ def render_dashboard() -> None:
         )
         st.stop()
 
-    # ── Data last updated ────────────────────────────────────────────────────
+    # ── Data last updated (main body, below title) ───────────────────────────
     last_updated = db.get_last_updated(gran_key)
     if last_updated is not None:
         st.caption(f"Data last updated: {_format_last_updated(last_updated)}")
 
-    # ── Period pickers (one per period, widget type depends on granularity) ──
+    # ── Period pickers (sidebar; widget type depends on granularity) ─────────
     available_dates: list[date] = db.get_available_dates(gran_key)
     if len(available_dates) < 2:
         st.warning(
@@ -362,74 +406,66 @@ def render_dashboard() -> None:
     this_default = options_desc[0]
     prev_default = options_desc[1]
 
-    col1, col2 = st.columns(2)
-
     if granularity == "Daily":
-        with col1:
-            picked_this = st.date_input(
-                "This Period",
-                value=this_default,
-                min_value=available_dates[0],
-                max_value=available_dates[-1],
-                key="this_period_date",
-            )
-        with col2:
-            picked_prev = st.date_input(
-                "Previous Period",
-                value=prev_default,
-                min_value=available_dates[0],
-                max_value=available_dates[-1],
-                key="prev_period_date",
-            )
+        picked_this = st.sidebar.date_input(
+            "This Period",
+            value=this_default,
+            min_value=available_dates[0],
+            max_value=available_dates[-1],
+            key="this_period_date",
+        )
+        picked_prev = st.sidebar.date_input(
+            "Previous Period",
+            value=prev_default,
+            min_value=available_dates[0],
+            max_value=available_dates[-1],
+            key="prev_period_date",
+        )
         this_period = _snap_to_available(picked_this, available_dates)
         prev_period = _snap_to_available(picked_prev, available_dates)
         if this_period != picked_this and this_period is not None:
-            st.caption(f"Snapped This Period to nearest available date: {this_period.strftime('%d/%m/%Y')}")
+            st.sidebar.caption(f"Snapped This Period to nearest available date: {this_period.strftime('%d/%m/%Y')}")
         if prev_period != picked_prev and prev_period is not None:
-            st.caption(f"Snapped Previous Period to nearest available date: {prev_period.strftime('%d/%m/%Y')}")
+            st.sidebar.caption(f"Snapped Previous Period to nearest available date: {prev_period.strftime('%d/%m/%Y')}")
 
     elif granularity == "Weekly":
         # Defensive: drop any session-state value that's no longer in options
         for k, default in [("this_period_week", this_default), ("prev_period_week", prev_default)]:
             if k in st.session_state and st.session_state[k] not in options_desc:
                 st.session_state[k] = default
-        with col1:
-            this_period = st.selectbox(
-                "This Period",
-                options=options_desc,
-                format_func=_format_week_label,
-                index=0 if "this_period_week" not in st.session_state else None,
-                key="this_period_week",
-            )
-        with col2:
-            prev_period = st.selectbox(
-                "Previous Period",
-                options=options_desc,
-                format_func=_format_week_label,
-                index=1 if "prev_period_week" not in st.session_state else None,
-                key="prev_period_week",
-            )
+        this_period = st.sidebar.selectbox(
+            "This Period",
+            options=options_desc,
+            format_func=_format_week_label,
+            index=0 if "this_period_week" not in st.session_state else None,
+            key="this_period_week",
+        )
+        prev_period = st.sidebar.selectbox(
+            "Previous Period",
+            options=options_desc,
+            format_func=_format_week_label,
+            index=1 if "prev_period_week" not in st.session_state else None,
+            key="prev_period_week",
+        )
 
     else:  # Monthly
         for k, default in [("this_period_month", this_default), ("prev_period_month", prev_default)]:
             if k in st.session_state and st.session_state[k] not in options_desc:
                 st.session_state[k] = default
-        with col1:
-            this_period = st.selectbox(
-                "This Period",
-                options=options_desc,
-                format_func=_format_month_label,
-                index=0 if "this_period_month" not in st.session_state else None,
-                key="this_period_month",
-            )
-        with col2:
-            prev_period = st.selectbox(
-                "Previous Period",
-                options=options_desc,
-                format_func=_format_month_label,
-                index=1 if "prev_period_month" not in st.session_state else None,
-                key="prev_period_month",
-            )
+        this_period = st.sidebar.selectbox(
+            "This Period",
+            options=options_desc,
+            format_func=_format_month_label,
+            index=0 if "this_period_month" not in st.session_state else None,
+            key="this_period_month",
+        )
+        prev_period = st.sidebar.selectbox(
+            "Previous Period",
+            options=options_desc,
+            format_func=_format_month_label,
+            index=1 if "prev_period_month" not in st.session_state else None,
+            key="prev_period_month",
+        )
 
     # Format caption + period strings per granularity
     if granularity == "Daily":
@@ -445,9 +481,31 @@ def render_dashboard() -> None:
         prev_label = _format_month_label(prev_period)
         csv_suffix = f"month_{this_period.strftime('%Y-%m')}_vs_{prev_period.strftime('%Y-%m')}"
 
-    st.caption(
-        f"Comparing {this_label} (This Period) vs {prev_label} (Previous Period) — "
-        "deltas are This Period minus Previous Period"
+    # Fill the pinned "Comparing" slot at the top of the sidebar now that we
+    # know the resolved periods. Styled card: subdued labels, emphasised values,
+    # subtle border + tint, compact vertical footprint.
+    comparing_slot.markdown(
+        f"""
+        <div style="
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-bottom: 4px;
+            line-height: 1.4;
+        ">
+          <div style="font-size: 0.78em; letter-spacing: 0.05em; opacity: 0.65; margin-bottom: 8px;">📊 COMPARING</div>
+          <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px;">
+            <span style="font-size: 0.82em; opacity: 0.6;">This</span>
+            <span style="font-weight: 600; font-size: 1.0em;">{this_label}</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: baseline;">
+            <span style="font-size: 0.82em; opacity: 0.6;">Previous</span>
+            <span style="font-weight: 600; font-size: 1.0em;">{prev_label}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     if this_period == prev_period:
@@ -471,7 +529,7 @@ def render_dashboard() -> None:
     # ── Fetch the two snapshots from Supabase ────────────────────────────────
     period_df = _prepare(db.get_data_for_dates(gran_key, [prev_period, this_period]))
 
-    # ── Cascading sub-filters ────────────────────────────────────────────────
+    # ── Cascading sub-filters (sidebar) ──────────────────────────────────────
     for _col in FILTER_COLS:
         st.session_state.setdefault(f"flt_{_col}", [])
 
@@ -490,21 +548,18 @@ def render_dashboard() -> None:
         key = f"flt_{_col}"
         st.session_state[key] = [v for v in st.session_state[key] if v in opts]
 
-    with st.expander("Filters (optional)", expanded=False):
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        with fc1:
-            st.multiselect("Platform", _options_for("Platform"), key="flt_Platform")
-        with fc2:
-            st.multiselect("Category", _options_for("Category"), key="flt_Category")
-        with fc3:
-            st.multiselect("Ptype", _options_for("Ptype"), key="flt_Ptype")
-        with fc4:
-            st.multiselect("Variant", _options_for("Variant"), key="flt_Variant")
+    st.sidebar.divider()
+    st.sidebar.markdown("**Filters**")
+    st.sidebar.multiselect("Platform", _options_for("Platform"), key="flt_Platform")
+    st.sidebar.multiselect("City", _options_for("City"), key="flt_City")
+    st.sidebar.multiselect("Category", _options_for("Category"), key="flt_Category")
+    st.sidebar.multiselect("Ptype", _options_for("Ptype"), key="flt_Ptype")
+    st.sidebar.multiselect("Variant", _options_for("Variant"), key="flt_Variant")
 
-        if st.button("Clear all filters"):
-            for _col in FILTER_COLS:
-                st.session_state[f"flt_{_col}"] = []
-            st.rerun()
+    if st.sidebar.button("Clear all filters"):
+        for _col in FILTER_COLS:
+            st.session_state[f"flt_{_col}"] = []
+        st.rerun()
 
     filtered = period_df
     for _col in FILTER_COLS:
@@ -520,9 +575,27 @@ def render_dashboard() -> None:
         st.stop()
 
     # ── Build merged dataset (OUTER so missing-side rows survive) ────────────
-    curr_sel = curr_all[KEY_COLS + METRIC_COLS].drop_duplicates(subset=KEY_COLS).copy()
-    prev_sel = prev_all[KEY_COLS + METRIC_COLS].drop_duplicates(subset=KEY_COLS).copy()
+    # Pass-through columns (not metrics, not merge keys) that we want to keep
+    # available on the merged frame for display + unmapped-count tracking.
+    PASS_THROUGH = [c for c in ("Item_ID", "erp_name") if c in filtered.columns]
+    curr_sel = (
+        curr_all[KEY_COLS + METRIC_COLS + PASS_THROUGH]
+        .drop_duplicates(subset=KEY_COLS).copy()
+    )
+    prev_sel = (
+        prev_all[KEY_COLS + METRIC_COLS + PASS_THROUGH]
+        .drop_duplicates(subset=KEY_COLS).copy()
+    )
     merged_all = curr_sel.merge(prev_sel, on=KEY_COLS, how="outer", suffixes=("_c", "_p"))
+
+    # Collapse the suffixed pass-through columns (e.g. Item_ID_c / Item_ID_p)
+    # back to a single column, preferring current; fall back to previous so
+    # rows that only exist in prev still have their identifiers populated.
+    for col in PASS_THROUGH:
+        c, p = f"{col}_c", f"{col}_p"
+        if c in merged_all.columns and p in merged_all.columns:
+            merged_all[col] = merged_all[c].combine_first(merged_all[p])
+            merged_all = merged_all.drop(columns=[c, p])
 
     def _f(col: str) -> pd.Series:
         return merged_all[col].fillna(0)
@@ -582,14 +655,36 @@ def render_dashboard() -> None:
     drainer_mask = _top50_mask((-drainers["Oft_abs"]).clip(lower=0))
     gainer_mask = _top50_mask(gainers["Oft_abs"].clip(lower=0))
 
+    def _unmapped_caption(df: pd.DataFrame) -> str | None:
+        """Caption string with distinct unmapped item_id count, or None to hide.
+        Hidden when the toggle is on Platform Name or there's nothing to flag."""
+        if st.session_state.get("sku_display_mode", "ERP Name") != "ERP Name":
+            return None
+        if "erp_name" not in df.columns:
+            return None
+        unmapped = df[df["erp_name"].isna()]
+        if "Item_ID" in df.columns:
+            n = unmapped["Item_ID"].nunique(dropna=True)
+        else:
+            n = unmapped["Product_Title"].nunique(dropna=True)
+        if n == 0:
+            return None
+        return (
+            f"{n} SKUs in this view are unmapped · update mapping in "
+            "Upload Data → Update SKU Mapping"
+        )
+
     # csv_suffix is computed once with the picker block, granularity-aware
 
     # ── Render Drainers ──────────────────────────────────────────────────────
     st.markdown("### 🔻 Drainers — Where we're losing Market Share")
-    st.caption(
-        f"Top 80% of current offtake only · {len(drainers):,} row(s) · "
-        "rows highlighted red contribute to the first 50% of total offtake decline"
+    st.markdown(
+        f"**Total: {len(drainers):,} rows** · Top 80% of current offtake · "
+        "Red rows = first 50% of total offtake decline"
     )
+    _drainer_unmapped_msg = _unmapped_caption(drainers)
+    if _drainer_unmapped_msg:
+        st.caption(_drainer_unmapped_msg)
     if drainers.empty:
         st.info("No drainers for the selected period.")
     else:
@@ -598,7 +693,9 @@ def render_dashboard() -> None:
             width="stretch",
             hide_index=True,
             column_config={
-                "SKU": st.column_config.TextColumn(width="medium"),
+                "SKU": st.column_config.TextColumn("SKU", pinned="left", width="medium"),
+                "City": st.column_config.TextColumn("City", pinned="left"),
+                "Platform": st.column_config.TextColumn("Platform", pinned="left"),
             },
         )
         st.download_button(
@@ -611,10 +708,13 @@ def render_dashboard() -> None:
 
     # ── Render Gainers ───────────────────────────────────────────────────────
     st.markdown("### 🔺 Gainers — Where we're gaining Market Share")
-    st.caption(
-        f"Top 80% of current offtake only · {len(gainers):,} row(s) · "
-        "rows highlighted green contribute to the first 50% of total offtake growth"
+    st.markdown(
+        f"**Total: {len(gainers):,} rows** · Top 80% of current offtake · "
+        "Green rows = first 50% of total offtake growth"
     )
+    _gainer_unmapped_msg = _unmapped_caption(gainers)
+    if _gainer_unmapped_msg:
+        st.caption(_gainer_unmapped_msg)
     if gainers.empty:
         st.info("No gainers for the selected period.")
     else:
@@ -623,7 +723,9 @@ def render_dashboard() -> None:
             width="stretch",
             hide_index=True,
             column_config={
-                "SKU": st.column_config.TextColumn(width="medium"),
+                "SKU": st.column_config.TextColumn("SKU", pinned="left", width="medium"),
+                "City": st.column_config.TextColumn("City", pinned="left"),
+                "Platform": st.column_config.TextColumn("Platform", pinned="left"),
             },
         )
         st.download_button(
