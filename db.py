@@ -126,6 +126,53 @@ def get_last_updated(granularity: str) -> Optional[datetime]:
     return pd.to_datetime(rows[0]["uploaded_at"]).to_pydatetime()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_data_freshness() -> dict:
+    """Coverage + upload info for all three granularities in one call.
+
+    Returns:
+        {
+            "daily":   {"latest_date": date or None, "latest_upload": datetime or None},
+            "weekly":  {...},
+            "monthly": {...},
+        }
+
+    latest_date  = MAX(date) from the table (as a Python date)
+    latest_upload = MAX(uploaded_at) from the table (tz-aware UTC datetime)
+
+    Empty tables return None for both fields. Errors on a per-granularity fetch
+    are swallowed and reported as Nones so a single flaky table doesn't take
+    down the whole freshness box.
+    """
+    client = _get_client()
+    out: dict = {}
+    for granularity, table in _TABLE_BY_GRANULARITY.items():
+        latest_date = None
+        latest_upload = None
+        try:
+            res = (
+                client.table(table).select("date").order("date", desc=True).limit(1).execute()
+            )
+            if res.data and res.data[0].get("date"):
+                latest_date = pd.to_datetime(res.data[0]["date"]).date()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            res = (
+                client.table(table)
+                .select("uploaded_at")
+                .order("uploaded_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if res.data and res.data[0].get("uploaded_at"):
+                latest_upload = pd.to_datetime(res.data[0]["uploaded_at"]).to_pydatetime()
+        except Exception:  # noqa: BLE001
+            pass
+        out[granularity] = {"latest_date": latest_date, "latest_upload": latest_upload}
+    return out
+
+
 def get_row_count(granularity: str) -> int:
     """Live row count for the granularity's table. Not cached on purpose."""
     table = _table_for(granularity)

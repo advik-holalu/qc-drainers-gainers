@@ -709,8 +709,31 @@ def _render_success_step() -> None:
             st.rerun()
 
 
+def _render_data_status_panel() -> None:
+    """Top-of-tab summary: the latest snapshot date present in each granularity
+    table. Daily/Weekly show 'Mon DD, YYYY'; Monthly shows 'Month YYYY'."""
+    c1, c2, c3 = st.columns(3)
+    for col, gran in [(c1, "Daily"), (c2, "Weekly"), (c3, "Monthly")]:
+        with col:
+            try:
+                dates = db.get_available_dates(gran.lower())
+            except Exception:  # noqa: BLE001 — non-fatal, just show '—'
+                dates = []
+            if dates:
+                latest = max(dates)
+                if gran == "Monthly":
+                    value = latest.strftime("%B %Y")
+                else:
+                    value = latest.strftime("%b %d, %Y")
+                st.metric(label=f"Latest {gran}", value=value)
+            else:
+                st.metric(label=f"Latest {gran}", value="—")
+
+
 def _render_data_flow() -> None:
     """Tab 1 — existing GobbleCube data upload flow, untouched."""
+    _render_data_status_panel()
+    st.divider()
     step = st.session_state.upload_step
     if step == "config":
         _render_config_step()

@@ -312,12 +312,6 @@ def _build_mz_view(missing_zero: pd.DataFrame) -> pd.DataFrame:
     return view.sort_values(["Issue", "SKU"], kind="stable").reset_index(drop=True)
 
 
-def _format_last_updated(dt) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(_IST).strftime("%d %b %Y, %H:%M") + " IST"
-
-
 def _format_week_label(d: date) -> str:
     """Format a weekly snapshot date as 'Mon DD, YYYY' (e.g. 'Apr 27, 2026')."""
     return d.strftime("%b %d, %Y")
@@ -388,6 +382,51 @@ def _render_sku_list_section(
         )
 
 
+def _render_data_freshness_box() -> None:
+    """Sidebar info box showing latest coverage + upload date per granularity.
+
+    Format per line: "**Daily:** Through 14 Jun 2026 (uploaded 29 Jun 2026)".
+    Monthly omits the day component: "Through May 2026".
+    Uses two-space soft-breaks so all three lines stay in the same paragraph.
+    """
+    try:
+        freshness = db.get_data_freshness()
+    except Exception:  # noqa: BLE001
+        st.sidebar.info("📅 **Data last updated**\n\nData freshness unavailable")
+        return
+
+    def _fmt_date(d, month_only: bool = False) -> str:
+        # No zero-pad on the day (e.g. "8 Jun 2026" not "08 Jun 2026") without
+        # relying on the platform-specific %-d format code.
+        if month_only:
+            return d.strftime("%b %Y")
+        return f"{d.day} {d.strftime('%b %Y')}"
+
+    def _fmt_upload(dt) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(_IST)
+        return f"{local.day} {local.strftime('%b %Y')}"
+
+    lines: list[str] = ["📅 **Data last updated**", ""]
+    for gran_key, label in [("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")]:
+        info = freshness.get(gran_key) or {}
+        latest_date = info.get("latest_date")
+        latest_upload = info.get("latest_upload")
+        if latest_date is None:
+            # Trailing two spaces = markdown soft break within the same paragraph
+            lines.append(f"**{label}:** No data yet  ")
+        else:
+            date_str = _fmt_date(latest_date, month_only=(gran_key == "monthly"))
+            if latest_upload is None:
+                lines.append(f"**{label}:** Through {date_str}  ")
+            else:
+                lines.append(
+                    f"**{label}:** Through {date_str} (uploaded {_fmt_upload(latest_upload)})  "
+                )
+    st.sidebar.info("\n".join(lines))
+
+
 def _snap_to_available(picked, available: list[date]) -> date | None:
     """Return the available date closest to picked (None if list is empty)."""
     if not available:
@@ -447,11 +486,6 @@ def render_dashboard() -> None:
             f"or upload {granularity} data via the Upload page."
         )
         st.stop()
-
-    # ── Data last updated (main body, below title) ───────────────────────────
-    last_updated = db.get_last_updated(gran_key)
-    if last_updated is not None:
-        st.caption(f"Data last updated: {_format_last_updated(last_updated)}")
 
     # ── Period pickers (sidebar; widget type depends on granularity) ─────────
     available_dates: list[date] = db.get_available_dates(gran_key)
@@ -664,6 +698,10 @@ def render_dashboard() -> None:
         save_button_key="new_save_btn",
         save_fn=db.replace_new_skus,
     )
+
+    # ── Data freshness box (bottom of sidebar) ───────────────────────────────
+    st.sidebar.divider()
+    _render_data_freshness_box()
 
     # ── Apply filters to the dataframe ───────────────────────────────────────
     filtered = period_df
