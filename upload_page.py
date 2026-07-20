@@ -22,6 +22,10 @@ CANONICAL_COLUMNS = [
     "Wt. OSA %", "Avg. OSA %", "MRP", "Selling Price",
     "Ptype", "Variant",
 ]
+# Ptype/Variant are no longer used by the dashboard (Phase 13). We still let
+# the file provide them for backward compatibility, but if they're absent from
+# the file we insert them as NULL rather than rejecting the upload.
+OPTIONAL_COLUMNS = {"Ptype", "Variant"}
 REQUIRED_NON_NULL = ["Platform", "Date", "City", "Product Title"]
 DEDUP_KEYS_DISPLAY = ["Date", "Platform", "City", "Product Title", "Ptype", "Variant"]
 GRANULARITY_OPTIONS = ["Daily", "Weekly", "Monthly"]
@@ -341,12 +345,26 @@ def _validate_file(uploaded_file) -> dict:
     # Fuzzy column matching — tolerate case / spacing / underscore / hyphen / dot
     # / paren variations and any column order coming out of GobbleCube exports.
     rename_map, missing = _build_column_rename_map(df.columns.tolist(), CANONICAL_COLUMNS)
-    if missing:
+    required_missing = [c for c in missing if c not in OPTIONAL_COLUMNS]
+    optional_missing = [c for c in missing if c in OPTIONAL_COLUMNS]
+    if required_missing:
         result["errors"].append(
-            "Missing required columns (or recognizable variants): " + ", ".join(missing)
+            "Missing required columns (or recognizable variants): "
+            + ", ".join(required_missing)
         )
         return result
     df = df.rename(columns=rename_map)
+
+    # Backfill any absent optional columns as None so downstream code can
+    # treat all canonical columns as present (they just insert as SQL NULL).
+    for col in optional_missing:
+        df[col] = None
+    if optional_missing:
+        if len(optional_missing) == 2:
+            note = "Ptype and Variant columns not found in file — proceeding without them"
+        else:
+            note = f"{optional_missing[0]} column not found in file — proceeding without it"
+        result["warnings"].append(note)
 
     null_counts = {c: int(df[c].isna().sum()) for c in REQUIRED_NON_NULL}
     if any(n > 0 for n in null_counts.values()):
@@ -709,31 +727,8 @@ def _render_success_step() -> None:
             st.rerun()
 
 
-def _render_data_status_panel() -> None:
-    """Top-of-tab summary: the latest snapshot date present in each granularity
-    table. Daily/Weekly show 'Mon DD, YYYY'; Monthly shows 'Month YYYY'."""
-    c1, c2, c3 = st.columns(3)
-    for col, gran in [(c1, "Daily"), (c2, "Weekly"), (c3, "Monthly")]:
-        with col:
-            try:
-                dates = db.get_available_dates(gran.lower())
-            except Exception:  # noqa: BLE001 — non-fatal, just show '—'
-                dates = []
-            if dates:
-                latest = max(dates)
-                if gran == "Monthly":
-                    value = latest.strftime("%B %Y")
-                else:
-                    value = latest.strftime("%b %d, %Y")
-                st.metric(label=f"Latest {gran}", value=value)
-            else:
-                st.metric(label=f"Latest {gran}", value="—")
-
-
 def _render_data_flow() -> None:
     """Tab 1 — existing GobbleCube data upload flow, untouched."""
-    _render_data_status_panel()
-    st.divider()
     step = st.session_state.upload_step
     if step == "config":
         _render_config_step()
@@ -760,6 +755,11 @@ def render_upload() -> None:
         return
 
     _render_authed_header()
+
+    # Freshness banner sits ABOVE the tabs so it's visible on both tabs.
+    # Content built by db.format_freshness_markdown() — same source of truth
+    # as the dashboard sidebar's freshness box (identical content + formatting).
+    st.info(db.format_freshness_markdown())
 
     tab_data, tab_mapping = st.tabs(["📤 Upload Data", "🏷️ Update SKU Mapping"])
     with tab_data:

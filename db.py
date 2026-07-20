@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional, Sequence
 
 import httpx
@@ -171,6 +171,56 @@ def get_data_freshness() -> dict:
             pass
         out[granularity] = {"latest_date": latest_date, "latest_upload": latest_upload}
     return out
+
+
+# IST = UTC+5:30 (team is in India). uploaded_at is stored UTC in Supabase.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def format_freshness_markdown() -> str:
+    """Build the markdown body of the 'Data last updated' info box.
+
+    Single source of truth so every rendering site (dashboard sidebar +
+    Upload Data header) shows the same content. Fetches via
+    get_data_freshness(); on any failure returns a graceful placeholder
+    body instead of raising, so callers can just wrap the return value
+    in st.info() / st.sidebar.info().
+    """
+    try:
+        freshness = get_data_freshness()
+    except Exception:  # noqa: BLE001
+        return "📅 **Data last updated**\n\nData freshness unavailable"
+
+    def _fmt_date(d, month_only: bool = False) -> str:
+        # Hand-formatted day (no zero-pad) so we don't rely on %-d which
+        # isn't portable to Windows.
+        if month_only:
+            return d.strftime("%b %Y")
+        return f"{d.day} {d.strftime('%b %Y')}"
+
+    def _fmt_upload(dt) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(_IST)
+        return f"{local.day} {local.strftime('%b %Y')}"
+
+    lines: list[str] = ["📅 **Data last updated**", ""]
+    for gran_key, label in [("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")]:
+        info = freshness.get(gran_key) or {}
+        latest_date = info.get("latest_date")
+        latest_upload = info.get("latest_upload")
+        if latest_date is None:
+            # Trailing two spaces = markdown soft break within same paragraph
+            lines.append(f"**{label}:** No data yet  ")
+        else:
+            date_str = _fmt_date(latest_date, month_only=(gran_key == "monthly"))
+            if latest_upload is None:
+                lines.append(f"**{label}:** Through {date_str}  ")
+            else:
+                lines.append(
+                    f"**{label}:** Through {date_str} (uploaded {_fmt_upload(latest_upload)})  "
+                )
+    return "\n".join(lines)
 
 
 def get_row_count(granularity: str) -> int:

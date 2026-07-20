@@ -1,4 +1,4 @@
-from datetime import date, timedelta, timezone
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -34,18 +34,14 @@ _DISPLAY_TO_INTERNAL = {
     "Variant": "Variant",
 }
 
-KEY_COLS = ["City", "Ptype", "Variant", "Product_Title", "Platform", "Category"]
+KEY_COLS = ["City", "Product_Title", "Platform", "Category"]
 METRIC_COLS = ["Offtake_MRP", "MS_MRP", "Wt_OSA", "Ad_SOV", "Overall_SOV", "Selling_Price"]
-FILTER_COLS = ["Platform", "City", "Category", "Ptype", "Variant"]
+FILTER_COLS = ["Platform", "City", "Category"]
 
 # Subtle row backgrounds for the top-50% offtake contributors. Slightly lifted
 # tones that read across both light and dark modes.
 ROW_BG_DRAINERS = "#4a2828"
 ROW_BG_GAINERS = "#28402a"
-
-# IST = UTC+5:30 (team is in India). uploaded_at is stored UTC in Supabase.
-_IST = timezone(timedelta(hours=5, minutes=30))
-
 
 # ── Cleanup helpers ──────────────────────────────────────────────────────────
 def _uncategorized(v):
@@ -161,8 +157,6 @@ def _make_display(data: pd.DataFrame) -> pd.DataFrame:
         "SKU": _resolve_sku_column(data).values,
         "City": data["City"].values,
         "Platform": data["Platform"].values,
-        "Ptype": data["Ptype"].values,
-        "Variant": data["Variant"].values,
         "Category": data["Category"].values,
         "MS Prev": data["MS_MRP_p"].values,
         "MS Current": data["MS_MRP_c"].values,
@@ -285,7 +279,7 @@ def _build_mz_view(missing_zero: pd.DataFrame) -> pd.DataFrame:
     if missing_zero.empty:
         return pd.DataFrame(
             columns=[
-                "SKU", "City", "Platform", "Ptype", "Variant", "Category",
+                "SKU", "City", "Platform", "Category",
                 "Offtake (MRP) This Week", "Offtake (MRP) Previous Week", "Issue",
             ]
         )
@@ -302,8 +296,6 @@ def _build_mz_view(missing_zero: pd.DataFrame) -> pd.DataFrame:
         "SKU": missing_zero["Product_Title"].values,
         "City": missing_zero["City"].values,
         "Platform": missing_zero["Platform"].values,
-        "Ptype": missing_zero["Ptype"].values,
-        "Variant": missing_zero["Variant"].values,
         "Category": missing_zero["Category"].values,
         "Offtake (MRP) This Week": missing_zero["Offtake_MRP_c"].values,
         "Offtake (MRP) Previous Week": missing_zero["Offtake_MRP_p"].values,
@@ -384,47 +376,9 @@ def _render_sku_list_section(
 
 def _render_data_freshness_box() -> None:
     """Sidebar info box showing latest coverage + upload date per granularity.
-
-    Format per line: "**Daily:** Through 14 Jun 2026 (uploaded 29 Jun 2026)".
-    Monthly omits the day component: "Through May 2026".
-    Uses two-space soft-breaks so all three lines stay in the same paragraph.
-    """
-    try:
-        freshness = db.get_data_freshness()
-    except Exception:  # noqa: BLE001
-        st.sidebar.info("📅 **Data last updated**\n\nData freshness unavailable")
-        return
-
-    def _fmt_date(d, month_only: bool = False) -> str:
-        # No zero-pad on the day (e.g. "8 Jun 2026" not "08 Jun 2026") without
-        # relying on the platform-specific %-d format code.
-        if month_only:
-            return d.strftime("%b %Y")
-        return f"{d.day} {d.strftime('%b %Y')}"
-
-    def _fmt_upload(dt) -> str:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        local = dt.astimezone(_IST)
-        return f"{local.day} {local.strftime('%b %Y')}"
-
-    lines: list[str] = ["📅 **Data last updated**", ""]
-    for gran_key, label in [("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")]:
-        info = freshness.get(gran_key) or {}
-        latest_date = info.get("latest_date")
-        latest_upload = info.get("latest_upload")
-        if latest_date is None:
-            # Trailing two spaces = markdown soft break within the same paragraph
-            lines.append(f"**{label}:** No data yet  ")
-        else:
-            date_str = _fmt_date(latest_date, month_only=(gran_key == "monthly"))
-            if latest_upload is None:
-                lines.append(f"**{label}:** Through {date_str}  ")
-            else:
-                lines.append(
-                    f"**{label}:** Through {date_str} (uploaded {_fmt_upload(latest_upload)})  "
-                )
-    st.sidebar.info("\n".join(lines))
+    Content is built in db.format_freshness_markdown() so this render site
+    stays in perfect lock-step with the Upload Data page's freshness box."""
+    st.sidebar.info(db.format_freshness_markdown())
 
 
 def _snap_to_available(picked, available: list[date]) -> date | None:
@@ -647,8 +601,6 @@ def render_dashboard() -> None:
     st.sidebar.multiselect("Platform", _options_for("Platform"), key="flt_Platform")
     st.sidebar.multiselect("City", _options_for("City"), key="flt_City")
     st.sidebar.multiselect("Category", _options_for("Category"), key="flt_Category")
-    st.sidebar.multiselect("Ptype", _options_for("Ptype"), key="flt_Ptype")
-    st.sidebar.multiselect("Variant", _options_for("Variant"), key="flt_Variant")
 
     if st.sidebar.button("Clear all filters"):
         for _col in FILTER_COLS:
