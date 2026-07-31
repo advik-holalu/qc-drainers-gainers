@@ -372,16 +372,29 @@ def _validate_file(uploaded_file) -> dict:
         result["errors"].append(f"Null values in required fields: {bad}")
         return result
 
-    try:
-        parsed = pd.to_datetime(df["Date"], format="%m/%d/%y", errors="raise")
-        df["Date"] = parsed.dt.strftime("%Y-%m-%d")
-    except Exception:  # noqa: BLE001
-        bad_mask = pd.to_datetime(df["Date"], format="%m/%d/%y", errors="coerce").isna()
-        examples = df.loc[bad_mask, "Date"].astype(str).head(5).tolist()
+    # Try each known format in order; use the first one that parses every row
+    # cleanly. Format order matters: M/D/YY first (original GobbleCube), then
+    # YYYY-MM-DD (new Report Builder), then DD-MM-YYYY (Excel-corrupted).
+    _DATE_FORMATS = {
+        "%m/%d/%y": "M/D/YY",
+        "%Y-%m-%d": "YYYY-MM-DD",
+        "%d-%m-%Y": "DD-MM-YYYY",
+    }
+    parsed = None
+    for fmt in _DATE_FORMATS:
+        candidate = pd.to_datetime(df["Date"], format=fmt, errors="coerce")
+        if candidate.notna().all():
+            parsed = candidate
+            break
+    if parsed is None:
+        examples = df["Date"].astype(str).head(5).tolist()
         result["errors"].append(
-            f"Could not parse Date column as M/D/YY. First failing values: {examples}"
+            f"Could not parse Date column. Tried formats: "
+            f"{', '.join(_DATE_FORMATS.values())}. "
+            f"First 5 values from your file: {examples}"
         )
         return result
+    df["Date"] = parsed.dt.strftime("%Y-%m-%d")
 
     # Restrict to canonical columns in canonical order — drops any extras silently
     # and gives downstream code a guaranteed column layout.
